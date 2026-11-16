@@ -1,0 +1,162 @@
+#include <Wire.h>
+#include <BH1750.h>
+#include <ESP32Servo.h>
+
+// --- Пины ---
+#define SDA_PIN 8
+#define SCL_PIN 9
+#define SERVO_PIN 10  
+#define LED_PIN   3     // Светодиод (GPIO 3 -> GND)
+#define AUDIO_PIN 5     // Усилитель PAM8403 (канал R на GPIO 5)
+
+// --- Пороги освещенности ---
+BH1750 lightMeter;
+const float LOW_LUX_THRESHOLD = 25.0;
+const float HIGH_LUX_THRESHOLD = 100.0;
+
+// --- Настройки сервопривода ---
+Servo myServo;
+const int CW_ANGLE = 110;    // Раскрыто (в темноте)
+const int CCW_ANGLE = 30;     // Закрыто (на свету)
+int currentAngle = 90;       
+int targetAngle = 90;        
+const unsigned long stepDelay = 20;    
+
+unsigned long lastServoStepTime = 0;
+unsigned long lastLuxReadTime = 0;
+
+// --- Мелодия музыкальной шкатулки ("К Элизе") ---
+const int melodyNotes[] = {
+  1319, 1245, 1319, 1245, 1319, 988, 1175, 1047, 880, 0,
+  523, 659, 880, 988, 0, 659, 831, 988, 1047, 0,
+  659, 1319, 1245, 1319, 1245, 1319, 988, 1175, 1047, 880
+};
+const int noteDurations[] = {
+  160, 160, 160, 160, 160, 160, 160, 160, 320, 100,
+  160, 160, 160, 320, 100, 160, 160, 160, 320, 100,
+  160, 160, 160, 160, 160, 160, 160, 160, 160, 350
+};
+const int totalNotes = sizeof(melodyNotes) / sizeof(melodyNotes[0]);
+
+int currentNote = 0;
+unsigned long lastNoteTime = 0;
+bool isPlaying = false;
+
+// --- Аппаратный ШИМ для громкого звука через PAM8403 ---
+void setupAudio() {
+  #if ESP_ARDUINO_VERSION_MAJOR >= 3
+    ledcAttachChannel(AUDIO_PIN, 2000, 8, 4);
+  #else
+    ledcSetup(4, 2000, 8);
+    ledcAttachPin(AUDIO_PIN, 4);
+  #endif
+}
+
+void playTone(int freq) {
+  #if ESP_ARDUINO_VERSION_MAJOR >= 3
+    if (freq == 0) {
+      ledcWrite(AUDIO_PIN, 0);
+    } else {
+      ledcWriteTone(AUDIO_PIN, freq);
+      ledcWrite(AUDIO_PIN, 128); // Громкость (скважность 50%)
+    }
+  #else
+    if (freq == 0) {
+      ledcWrite(4, 0);
+    } else {
+      ledcWriteTone(4, freq);
+      ledcWrite(4, 128); // Громкость (скважность 50%)
+    }
+  #endif
+}
+
+void updateMusicBox(bool shouldPlay) {
+  if (!shouldPlay) {
+    if (isPlaying) {
+      playTone(0);
+      isPlaying = false;
+      currentNote = 0;
+    }
+    return;
+  }
+
+  unsigned long now = millis();
+  if (!isPlaying) {
+    isPlaying = true;
+    currentNote = 0;
+    lastNoteTime = now;
+    playTone(melodyNotes[currentNote]);
+  } else if (now - lastNoteTime >= noteDurations[currentNote]) {
+    lastNoteTime = now;
+    currentNote = (currentNote + 1) % totalNotes;
+    playTone(melodyNotes[currentNote]);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // 1. Светодиод
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  // 2. Инициализация звука
+  setupAudio();
+  playTone(0);
+
+  // 3. Датчик света BH1750 (автоопределение адреса 0x5C или 0x23)
+  Wire.begin(SDA_PIN, SCL_PIN);
+  if (!lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x5C)) {
+    lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23);
+  }
+
+  // 4. Сервопривод
+  ESP32PWM::allocateTimer(0);
+  myServo.setPeriodHertz(50);
+  myServo.attach(SERVO_PIN, 500, 2400);
+  myServo.write(currentAngle);
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  // Опрос датчика света каждые 200 мс
+  if (now - lastLuxReadTime >= 200) {
+    lastLuxReadTime = now;
+    float lux = lightMeter.readLightLevel();
+
+    if (lux >= 0) {
+      if (lux < LOW_LUX_THRESHOLD) {
+        targetAngle = CW_ANGLE;   // Темно -> раскрываемся (180°)
+      } else if (lux > HIGH_LUX_THRESHOLD) {
+        targetAngle = CCW_ANGLE;  // Светло -> закрываемся (0°)
+      }
+    }
+  }
+
+  // Плавное движение сервопривода
+  if (currentAngle != targetAngle) {
+    if (now - lastServoStepTime >= stepDelay) {
+      lastServoStepTime = now;
+
+      if (currentAngle < targetAngle) {
+        currentAngle++;
+      } else {
+        currentAngle--;
+      }
+      myServo.write(currentAngle);
+    }
+  }
+
+  // Мелодия играет ТОЛЬКО во время раскрытия (движение к 180°)
+  bool isOpening = (targetAngle == CW_ANGLE && currentAngle < CW_ANGLE);
+  updateMusicBox(isOpening);
+
+  // Управление светодиодом: горит, когда полностью раскрыт в темноте
+  if (targetAngle == CW_ANGLE) {
+    digitalWrite(LED_PIN, HIGH);
+  } else if (targetAngle == CCW_ANGLE) {
+    digitalWrite(LED_PIN, LOW);
+  }
+}

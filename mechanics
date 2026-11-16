@@ -153,7 +153,7 @@ void loop() {
   bool isOpening = (targetAngle == CW_ANGLE && currentAngle < CW_ANGLE);
   updateMusicBox(isOpening);
 
-  // Управление светодиодом: горит, когда полностью раскрыт в темноте
+  // Управление светодиодом: горит, когда в моменте зафиксировал изменение порога
   if (targetAngle == CW_ANGLE) {
     digitalWrite(LED_PIN, HIGH);
   } else if (targetAngle == CCW_ANGLE) {
